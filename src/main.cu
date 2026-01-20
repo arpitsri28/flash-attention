@@ -195,14 +195,37 @@ ErrorStats run_attention(int batch, int seq_len, int n_heads) {
     args.n_Q_blocks = seq_len / B_r;
     args.n_KV_blocks = seq_len / B_c;
 
-    if constexpr (std::is_same_v<value_t, half>) {
-        launch_flash_attention_forward(args, ScalarType::kF16, batch);
-    } else {
-        launch_flash_attention_forward(args, ScalarType::kBF16, batch);
-    }
+    auto launch_kernel = [&]() {
+        if constexpr (std::is_same_v<value_t, half>) {
+            launch_flash_attention_forward(args, ScalarType::kF16, batch);
+        } else {
+            launch_flash_attention_forward(args, ScalarType::kBF16, batch);
+        }
+    };
 
-    CUDA_CHECK(cudaGetLastError());
+    for (int i = 0; i < 10; ++i) {
+        launch_kernel();
+    }
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    for (int i = 0; i < 100; ++i) {
+        launch_kernel();
+    }
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaGetLastError());
+
+    float elapsed_ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+    const float avg_ms = elapsed_ms / 100.0f;
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
 
     CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, total_elems * sizeof(value_t),
                           cudaMemcpyDeviceToHost));
@@ -216,9 +239,13 @@ ErrorStats run_attention(int batch, int seq_len, int n_heads) {
     if constexpr (std::is_same_v<value_t, half>) {
         std::cout << "FP16 checksum (seq_len=" << seq_len
                   << "): " << checksum << "\n";
+        std::cout << "FP16 avg kernel time (seq_len=" << seq_len
+                  << "): " << avg_ms << " ms\n";
     } else {
         std::cout << "BF16 checksum (seq_len=" << seq_len
                   << "): " << checksum << "\n";
+        std::cout << "BF16 avg kernel time (seq_len=" << seq_len
+                  << "): " << avg_ms << " ms\n";
     }
 
     ErrorStats stats;
